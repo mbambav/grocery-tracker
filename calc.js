@@ -3,6 +3,15 @@ import { categoryDefault } from './defaults.js';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export function toDateOnly(d) {
+  // Bare "YYYY-MM-DD" strings (from <input type="date">, or our own settings)
+  // must be parsed as LOCAL calendar dates, not UTC. new Date("2026-09-12")
+  // parses as UTC midnight, and .getDate() reads it back in local time — for
+  // anyone west of UTC that silently returns the previous day. Parsing the
+  // components ourselves avoids that shift entirely.
+  if (typeof d === 'string') {
+    const m = d.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  }
   const dt = new Date(d);
   return new Date(dt.getFullYear(), dt.getMonth(), dt.getDate());
 }
