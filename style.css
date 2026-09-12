@@ -321,6 +321,60 @@ button[type="submit"]:hover { background: var(--sage); }
 }
 .btn-danger:hover { background: var(--tomato-dim); }
 
+.btn-plain {
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--ink-soft);
+  padding: 0.3em 0.7em;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+.btn-plain:hover { background: var(--paper-dim); }
+
+.btn-save {
+  background: var(--sage);
+  border: 1px solid var(--sage);
+  color: white;
+  padding: 0.3em 0.7em;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+
+.row--editing td { background: var(--paper-dim); vertical-align: top; padding-top: 0.5em; padding-bottom: 0.5em; }
+.row--editing input, .row--editing select { font-size: 0.82rem; padding: 0.35em 0.4em; }
+
+.scan-panel {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.scan-panel input[type="file"] {
+  display: block;
+  margin: 0.75em 0;
+  font-size: 0.85rem;
+}
+
+#scan-btn, #scan-commit {
+  background: var(--sage);
+  color: white;
+  border: none;
+  padding: 0.55em 1.1em;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-weight: 500;
+}
+#scan-btn:disabled { background: var(--line); cursor: default; }
+#scan-commit { margin-right: 0.5em; }
+
+.scan-table td select { margin-top: 0.3em; display: block; }
+.row--excluded { opacity: 0.45; }
+.row--excluded input, .row--excluded select { text-decoration: line-through; }
+
 #disconnect { background: none; border: 1px solid var(--tomato); color: var(--tomato); }
 #disconnect:hover { background: var(--tomato-dim); }
 

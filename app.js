@@ -1,5 +1,6 @@
 import { CATEGORIES, categoryDefault } from './defaults.js';
 import * as gh from './github-store.js';
+import { parseReceiptLines, parseReceiptDate } from './receipt-parser.js';
 import {
   getPeriodBounds, getPeriodBoundsAtOffset, periodBudget, purchasesInRange, totalSpend, projectedSpend,
   inferLastingDays, nextBuyEstimate, fmtMoney, fmtDate, addDays, toDateOnly,
@@ -11,6 +12,12 @@ let data = null;
 let currentPeriodOffset = 0; // 0 = current period, -1 = previous, etc.
 let saveTimer = null;
 let saveStatus = 'idle'; // idle | saving | saved | error
+let editingPurchaseId = null;
+let scanCandidates = null; // null = scan panel closed; [] or [...] once a scan has run
+let scanReceiptDate = new Date().toISOString().slice(0, 10);
+let scanBuyerId = '';
+let scanBusy = false;
+let scanError = null;
 
 const root = document.getElementById('app');
 
@@ -240,7 +247,12 @@ function renderDashboard(el) {
 function renderPurchases(el) {
   const sorted = [...data.purchases].sort((a, b) => toDateOnly(b.date) - toDateOnly(a.date));
   el.innerHTML = `
-    <h2>Log a purchase</h2>
+    <h2>Scan a receipt</h2>
+    <div class="scan-panel">
+      ${renderScanPanel()}
+    </div>
+
+    <h2>Log a purchase manually</h2>
     <form id="purchase-form" class="form-grid">
       <label>Item
         <select name="itemId" required>
@@ -275,27 +287,65 @@ function renderPurchases(el) {
     <table class="data-table">
       <thead><tr><th>Date</th><th>Item</th><th>Qty</th><th>Price</th><th>Buyer</th><th>Finished on</th><th></th></tr></thead>
       <tbody>
-        ${sorted.map(p => {
-          const item = data.items.find(i => i.id === p.itemId);
-          const buyer = data.people.find(pp => pp.id === p.buyerId);
-          return `
-          <tr>
-            <td>${fmtDate(p.date)}</td>
-            <td>${item ? escapeHtml(item.name) : '(deleted item)'}</td>
-            <td>${p.quantity}${p.unit ? ' ' + escapeHtml(p.unit) : ''}</td>
-            <td>${fmtMoney(p.price)}</td>
-            <td>${buyer ? escapeHtml(buyer.name) : 'Shared'}</td>
-            <td>
-              <input type="date" data-finish-id="${p.id}" value="${p.finishedDate ? p.finishedDate.slice(0, 10) : ''}">
-            </td>
-            <td><button class="btn-danger" data-del-purchase="${p.id}">Delete</button></td>
-          </tr>`;
-        }).join('')}
+        ${sorted.map(p => renderPurchaseRow(p)).join('')}
       </tbody>
     </table>
     `}
   `;
 
+  wirePurchaseForm(el);
+  wirePurchaseRows(el);
+  wireScanPanel(el);
+}
+
+function renderPurchaseRow(p) {
+  const item = data.items.find(i => i.id === p.itemId);
+  const buyer = data.people.find(pp => pp.id === p.buyerId);
+
+  if (p.id === editingPurchaseId) {
+    return `
+      <tr class="row--editing">
+        <td><input type="date" data-edit-field="date" value="${p.date.slice(0, 10)}"></td>
+        <td>
+          <select data-edit-field="itemId">
+            ${data.items.map(i => `<option value="${i.id}" ${i.id === p.itemId ? 'selected' : ''}>${escapeHtml(i.name)}</option>`).join('')}
+          </select>
+        </td>
+        <td>
+          <input type="number" step="any" data-edit-field="quantity" value="${p.quantity}" style="width:4.5em">
+          <input data-edit-field="unit" value="${escapeHtml(p.unit || '')}" placeholder="unit" style="width:5em">
+        </td>
+        <td><input type="number" step="0.01" data-edit-field="price" value="${p.price}" style="width:5.5em"></td>
+        <td>
+          <select data-edit-field="buyerId">
+            <option value="">Shared</option>
+            ${data.people.map(pp => `<option value="${pp.id}" ${pp.id === p.buyerId ? 'selected' : ''}>${escapeHtml(pp.name)}</option>`).join('')}
+          </select>
+        </td>
+        <td><input type="date" data-edit-field="finishedDate" value="${p.finishedDate ? p.finishedDate.slice(0, 10) : ''}"></td>
+        <td>
+          <button class="btn-save" data-save-purchase="${p.id}">Save</button>
+          <button class="btn-plain" data-cancel-edit="${p.id}">Cancel</button>
+        </td>
+      </tr>`;
+  }
+
+  return `
+    <tr>
+      <td>${fmtDate(p.date)}</td>
+      <td>${item ? escapeHtml(item.name) : '(deleted item)'}</td>
+      <td>${p.quantity}${p.unit ? ' ' + escapeHtml(p.unit) : ''}</td>
+      <td>${fmtMoney(p.price)}</td>
+      <td>${buyer ? escapeHtml(buyer.name) : 'Shared'}</td>
+      <td><input type="date" data-finish-id="${p.id}" value="${p.finishedDate ? p.finishedDate.slice(0, 10) : ''}"></td>
+      <td>
+        <button class="btn-plain" data-edit-purchase="${p.id}">Edit</button>
+        <button class="btn-danger" data-del-purchase="${p.id}">Delete</button>
+      </td>
+    </tr>`;
+}
+
+function wirePurchaseForm(el) {
   document.getElementById('purchase-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -312,7 +362,9 @@ function renderPurchases(el) {
     persist();
     renderPurchases(el);
   });
+}
 
+function wirePurchaseRows(el) {
   el.querySelectorAll('[data-finish-id]').forEach(input => {
     input.addEventListener('change', () => {
       const p = data.purchases.find(x => x.id === input.dataset.finishId);
@@ -323,12 +375,247 @@ function renderPurchases(el) {
 
   el.querySelectorAll('[data-del-purchase]').forEach(btn => {
     btn.addEventListener('click', () => {
+      if (!confirm('Delete this purchase?')) return;
       data.purchases = data.purchases.filter(p => p.id !== btn.dataset.delPurchase);
       persist();
       renderPurchases(el);
     });
   });
+
+  el.querySelectorAll('[data-edit-purchase]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      editingPurchaseId = btn.dataset.editPurchase;
+      renderPurchases(el);
+    });
+  });
+
+  el.querySelectorAll('[data-cancel-edit]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      editingPurchaseId = null;
+      renderPurchases(el);
+    });
+  });
+
+  el.querySelectorAll('[data-save-purchase]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.savePurchase;
+      const p = data.purchases.find(x => x.id === id);
+      const row = btn.closest('tr');
+      const get = (field) => row.querySelector(`[data-edit-field="${field}"]`).value;
+      p.date = get('date');
+      p.itemId = get('itemId');
+      p.quantity = Number(get('quantity'));
+      p.unit = get('unit');
+      p.price = Number(get('price'));
+      p.buyerId = get('buyerId') || null;
+      p.finishedDate = get('finishedDate') || null;
+      editingPurchaseId = null;
+      persist();
+      renderPurchases(el);
+    });
+  });
 }
+
+// ---------- receipt scanning ----------
+
+function renderScanPanel() {
+  if (scanCandidates === null) {
+    return `
+      <p class="section-note">Take or upload a photo of a receipt. Text recognition happens in your browser — nothing is uploaded anywhere. It's often wrong about item names and quantities, so you'll review everything before it's saved.</p>
+      <input type="file" id="receipt-input" accept="image/*" capture="environment">
+      <button id="scan-btn" disabled>Scan receipt</button>
+      ${scanError ? `<div class="banner banner--danger">${escapeHtml(scanError)}</div>` : ''}
+    `;
+  }
+
+  if (scanBusy) {
+    return `<p id="scan-progress" class="section-note">Reading receipt… this can take 10–30 seconds.</p>`;
+  }
+
+  if (scanCandidates.length === 0) {
+    return `
+      <div class="banner banner--danger">Couldn't find any price lines on that image. Try a clearer, flatter photo, or add purchases manually below.</div>
+      <button id="scan-reset">Try another photo</button>
+    `;
+  }
+
+  return `
+    <p class="section-note">Found ${scanCandidates.length} candidate line${scanCandidates.length === 1 ? '' : 's'}. Fix anything wrong, uncheck anything that isn't actually an item (leftover totals/discounts sometimes slip through), then add them.</p>
+    <div class="form-grid">
+      <label>Receipt date
+        <input type="date" id="scan-date" value="${scanReceiptDate}">
+      </label>
+      <label>Buyer
+        <select id="scan-buyer">
+          <option value="">Shared</option>
+          ${data.people.map(p => `<option value="${p.id}" ${p.id === scanBuyerId ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
+        </select>
+      </label>
+    </div>
+    <table class="data-table scan-table">
+      <thead><tr><th></th><th>Name</th><th>Match to item</th><th>Qty</th><th>Price</th></tr></thead>
+      <tbody>
+        ${scanCandidates.map((c, idx) => `
+          <tr class="${c.include ? '' : 'row--excluded'}">
+            <td><input type="checkbox" data-scan-include="${idx}" ${c.include ? 'checked' : ''}></td>
+            <td><input data-scan-name="${idx}" value="${escapeHtml(c.name)}"></td>
+            <td>
+              <select data-scan-match="${idx}">
+                <option value="">+ New item</option>
+                ${data.items.map(i => `<option value="${i.id}" ${c.itemId === i.id ? 'selected' : ''}>${escapeHtml(i.name)}</option>`).join('')}
+              </select>
+              ${!c.itemId ? `
+                <select data-scan-category="${idx}">
+                  ${CATEGORIES.map(cat => `<option value="${cat.id}" ${c.category === cat.id ? 'selected' : ''}>${cat.label}</option>`).join('')}
+                </select>
+              ` : ''}
+            </td>
+            <td><input type="number" step="any" data-scan-qty="${idx}" value="${c.quantity}" style="width:4.5em"></td>
+            <td><input type="number" step="0.01" data-scan-price="${idx}" value="${c.price}" style="width:5.5em"></td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+    <button id="scan-commit">Add ${scanCandidates.filter(c => c.include).length} purchase${scanCandidates.filter(c => c.include).length === 1 ? '' : 's'}</button>
+    <button id="scan-reset" class="btn-plain">Discard scan</button>
+  `;
+}
+
+function wireScanPanel(el) {
+  const panel = el.querySelector('.scan-panel');
+
+  const fileInput = document.getElementById('receipt-input');
+  const scanBtn = document.getElementById('scan-btn');
+  if (fileInput && scanBtn) {
+    fileInput.addEventListener('change', () => { scanBtn.disabled = !fileInput.files.length; });
+    scanBtn.addEventListener('click', () => runScan(fileInput.files[0], panel));
+  }
+
+  const resetBtn = document.getElementById('scan-reset');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      scanCandidates = null;
+      scanError = null;
+      panel.innerHTML = renderScanPanel();
+      wireScanPanel(el);
+    });
+  }
+
+  const dateInput = document.getElementById('scan-date');
+  if (dateInput) dateInput.addEventListener('change', () => { scanReceiptDate = dateInput.value; });
+
+  const buyerSelect = document.getElementById('scan-buyer');
+  if (buyerSelect) buyerSelect.addEventListener('change', () => { scanBuyerId = buyerSelect.value; });
+
+  el.querySelectorAll('[data-scan-include]').forEach(cb => {
+    cb.addEventListener('change', () => { scanCandidates[cb.dataset.scanInclude].include = cb.checked; refreshScanPanel(panel, el); });
+  });
+  el.querySelectorAll('[data-scan-name]').forEach(inp => {
+    inp.addEventListener('input', () => { scanCandidates[inp.dataset.scanName].name = inp.value; });
+  });
+  el.querySelectorAll('[data-scan-qty]').forEach(inp => {
+    inp.addEventListener('input', () => { scanCandidates[inp.dataset.scanQty].quantity = Number(inp.value); });
+  });
+  el.querySelectorAll('[data-scan-price]').forEach(inp => {
+    inp.addEventListener('input', () => { scanCandidates[inp.dataset.scanPrice].price = Number(inp.value); });
+  });
+  el.querySelectorAll('[data-scan-match]').forEach(sel => {
+    sel.addEventListener('change', () => { scanCandidates[sel.dataset.scanMatch].itemId = sel.value; refreshScanPanel(panel, el); });
+  });
+  el.querySelectorAll('[data-scan-category]').forEach(sel => {
+    sel.addEventListener('change', () => { scanCandidates[sel.dataset.scanCategory].category = sel.value; });
+  });
+
+  const commitBtn = document.getElementById('scan-commit');
+  if (commitBtn) commitBtn.addEventListener('click', () => commitScan(el));
+}
+
+function refreshScanPanel(panel, el) {
+  panel.innerHTML = renderScanPanel();
+  wireScanPanel(el);
+}
+
+async function runScan(file, panel) {
+  if (!file) return;
+  scanBusy = true;
+  scanError = null;
+  scanCandidates = [];
+  panel.innerHTML = renderScanPanel();
+
+  try {
+    const mod = await import('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.esm.min.js');
+    const Tesseract = mod.default || mod;
+    const { data: ocr } = await Tesseract.recognize(file, 'eng', {
+      logger: (m) => {
+        const p = document.getElementById('scan-progress');
+        if (p && m.status) p.textContent = `${m.status}${m.progress ? ` — ${Math.round(m.progress * 100)}%` : ''}`;
+      },
+    });
+
+    const parsed = parseReceiptLines(ocr.text);
+    const guessedDate = parseReceiptDate(ocr.text);
+    if (guessedDate) scanReceiptDate = guessedDate;
+
+    scanCandidates = parsed.map(c => ({
+      ...c,
+      include: true,
+      itemId: matchExistingItem(c.name),
+      category: guessCategory(c.name),
+    }));
+  } catch (err) {
+    scanError = `Scan failed: ${err.message}. You can still add purchases manually below.`;
+    scanCandidates = null;
+  } finally {
+    scanBusy = false;
+    panel.innerHTML = renderScanPanel();
+    wireScanPanel(panel.closest('#tab-content'));
+  }
+}
+
+function matchExistingItem(name) {
+  const norm = name.toLowerCase();
+  const exact = data.items.find(i => i.name.toLowerCase() === norm);
+  if (exact) return exact.id;
+  const partial = data.items.find(i => norm.includes(i.name.toLowerCase()) || i.name.toLowerCase().includes(norm));
+  return partial ? partial.id : '';
+}
+
+function guessCategory(name) {
+  const norm = name.toLowerCase();
+  const hit = CATEGORIES.find(c => norm.includes(c.id.split('-')[1] || '___'));
+  return hit ? hit.id : 'other';
+}
+
+function commitScan(el) {
+  const included = scanCandidates.filter(c => c.include);
+  included.forEach(c => {
+    let itemId = c.itemId;
+    if (!itemId) {
+      itemId = uid();
+      data.items.push({
+        id: itemId,
+        name: c.name,
+        category: c.category || 'other',
+        shelfLifeDays: null,
+        shared: !scanBuyerId,
+      });
+    }
+    data.purchases.push({
+      id: uid(),
+      itemId,
+      date: scanReceiptDate,
+      quantity: c.quantity || 1,
+      unit: '',
+      price: c.price,
+      buyerId: scanBuyerId || null,
+      finishedDate: null,
+    });
+  });
+  scanCandidates = null;
+  persist();
+  renderPurchases(el);
+}
+
 
 // ---------- items ----------
 
